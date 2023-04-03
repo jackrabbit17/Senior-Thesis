@@ -1,0 +1,734 @@
+---
+title: "Non-Option Portfolio Simulations"
+author: "Jack Yoon"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage
+
+\section{Data and Libraries}
+
+```{r,cache=T}
+#Load Libraries 
+library(quantmod)
+library(ggplot2)
+
+#Use Quantmod to get data
+
+#Stocks
+getSymbols("SPY",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+
+#Volatility
+getSymbols("^VIX",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+
+#Gold
+getSymbols("SGGDX",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+
+#Commodities
+getSymbols("^BCOM",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+
+#Real Estate
+getSymbols("FRESX",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+
+#Vanguard Long-Term Investment-Grade
+getSymbols("VWESX",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+
+
+#Cash Proxy (3-Month Treasuries)
+getSymbols("DGS3MO",src = "FRED",from="2000/01/07",to="2021/12/31")
+
+#10-Year Treasuries
+getSymbols("DGS10",src = "FRED",from="2000/01/07",to="2021/12/31")
+
+#Create a merged data table of SPY, VIX data
+total = data.frame(merge(VIX,SPY,SGGDX,BCOM,FRESX,VWESX,DGS3MO,DGS10))
+
+#Calculate daily changes in dividend/split-adjusted SPY values
+total$return.daily.adjust = rep(NA,nrow(total))
+total$gld.return.daily = rep(NA,nrow(total))
+total$dbc.return.daily = rep(NA,nrow(total))
+total$re.return.daily = rep(NA,nrow(total))
+for(i in 2:nrow(total)){
+  total$return.daily.adjust[i] = total$SPY.Adjusted[i]/total$SPY.Adjusted[i-1]-1
+  total$gld.return.daily[i] = total$SGGDX.Adjusted[i]/total$SGGDX.Adjusted[i-1]-1
+  total$dbc.return.daily[i] = total$BCOM.Adjusted[i]/total$BCOM.Adjusted[i-1]-1
+  total$re.return.daily[i] = total$FRESX.Adjusted[i]/total$FRESX.Adjusted[i-1]-1
+  total$bond.return.daily[i] = total$VWESX.Adjusted[i]/total$VWESX.Adjusted[i-1]-1
+}
+total = total[8871:dim(total)[1],]
+total = na.omit(total)
+```
+
+\section{10-Year Return Profiles / S&P500, Diversified Fan of Outcomes}
+
+```{r}
+#Baseline Fan of Outcomes (Daily)
+fan = rep(NA,dim(total)[1]-252*5)
+for(i in 1:(dim(total)[1]-252*5)){
+  fan[i] = (total[i+252*5,]$SPY.Adjusted/total[i,]$SPY.Adjusted)^(1/5)-1
+}
+hist(fan)
+quantile(fan,na.rm=T)
+
+#Baseline Fan of Outcomes (Daily)
+```
+
+```{r}
+#60-40 Portfolio
+library(BondValuation)
+
+fan6040 = matrix(data=NA,nrow=252*5,ncol=dim(total)[1]-252*5)
+for(j in 1:(dim(total)[1]-252*5)){
+  #Initialize values
+  spy.portval = 60
+  bond.portval = 40
+  avg.yield = total$DGS10[j]
+  
+  for(i in 1:(252*5)){
+    #Assume AFS; daily rebalancing
+    spy.return = total$SPY.Adjusted[j+i]/total$SPY.Adjusted[j+i-1]-1
+    spy.portval = spy.portval*(1+spy.return)
+    
+    #Bond Interest Return
+    bond.portval = bond.portval*(1+total$bond.return.daily[j+i])
+    
+    #Rebalance monthly
+    if(i %% 30 == 1 & i != 1){
+      
+      #Calculate proportions
+      prop = (spy.portval/(bond.portval+spy.portval))
+      
+      if(prop > 0.6){
+        reduction = spy.portval-0.6*(bond.portval+spy.portval)
+        spy.portval = spy.portval-reduction
+        bond.portval = bond.portval+reduction
+        avg.yield = total$DGS10[j+i]
+      }
+      
+      if(prop < 0.6){
+        increase = 0.6*(bond.portval+spy.portval)-spy.portval
+        spy.portval = spy.portval+increase
+        bond.portval = bond.portval-increase
+        avg.yield = total$DGS10[j+i]
+      }
+    }
+    
+    fan6040[i,j] = spy.portval+bond.portval
+  }
+}
+
+#Calculate returns
+fan6040.returns = rep(NA,(dim(total)[1]-252*5))
+for(j in 1:(dim(total)[1]-252*5)){
+  fan6040.returns[j] = (fan6040[252*5,j]/fan6040[1,j])^(1/5)-1
+}
+hist(fan6040.returns)
+quantile(fan6040.returns,na.rm=T)
+quantile(fan,na.rm=T)
+```
+
+```{r}
+#Diversified Portfolio (25% Cash, 25% S&P, 25% Gold, 25% 10-Year)
+fan.diversified = matrix(data=NA,nrow=252*5,ncol=dim(total)[1]-252*5)
+
+for(j in 1:(dim(total)[1]-252*5)){
+  #Initialize values
+  cash.portval = 25
+  spy.portval = 25
+  gold.portval = 25
+  bond.portval = 25
+  cash.increase = 0
+  
+  avg.yield = total$DGS10[j]
+  
+  for(i in 1:(252*5)){
+    #SPY
+    spy.return = total$SPY.Adjusted[j+i]/total$SPY.Adjusted[j+i-1]-1
+    spy.portval = spy.portval*(1+spy.return)
+    
+    #Gold
+    gold.return = total$gld.return.daily[j+i]
+    gold.portval = gold.portval*(1+gold.return)
+    
+    #Cash
+    cash.daily.return = ((total$DGS3MO[j+i]/100+1)^(1/252)-1)*100
+    cash.portval = cash.portval*(1+cash.daily.return/100)
+    
+    #Bond Interest Return
+    bond.portval = bond.portval*(1+total$bond.return.daily[j+i])
+    
+    if(i %% 30 == 1 & i != 1){
+      
+      #Calculate proportions
+      total.portval = spy.portval + gold.portval + cash.portval + bond.portval
+      
+      prop.spy = spy.portval/total.portval
+      prop.gold = gold.portval/total.portval
+      prop.cash = cash.portval/total.portval
+      prop.bond = bond.portval/total.portval
+      
+      #Rule: waterfall out highest-risk assets for the lowest-risk assets (e.g. if proportion of stocks goes beyond 25%, switch into cash first, then bonds, then gold); if proportion of stocks goes under 25%, look for leeway in gold first, then bonds, then cash
+      
+      #If proportion of stocks is greater than 25%
+      if(prop.spy > 0.25){
+        reduction = spy.portval-0.25*total.portval
+        
+        if(prop.cash < 0.25){
+          cash.increase = min((0.25-prop.cash)*total.portval,reduction)
+          cash.portval = cash.portval + cash.increase
+          spy.portval = spy.portval-cash.increase
+          
+          if(cash.increase < reduction){
+            bond.increase = min((0.25-prop.bond)*total.portval,reduction-cash.increase)
+            bond.portval = bond.portval + bond.increase
+            spy.portval = spy.portval-bond.increase
+            
+            if(cash.increase + bond.increase < reduction){
+              gold.increase = min((0.25-prop.gold)*total.portval,reduction-cash.increase-bond.increase)
+              gold.portval = gold.portval + gold.increase
+              spy.portval = spy.portval-gold.increase
+            }
+          }
+        }
+        
+        if(prop.bond < 0.25){
+          bond.increase = min((0.25-prop.bond)*total.portval,reduction)
+          bond.portval = bond.portval + bond.increase
+          spy.portval = spy.portval-bond.increase
+          
+          if(cash.increase + bond.increase < reduction){
+            gold.increase = min((0.25-prop.gold)*total.portval,reduction-bond.increase)
+            gold.portval = gold.portval + gold.increase
+            spy.portval = spy.portval-gold.increase
+          }
+        }
+        
+        if(prop.gold < 0.25){
+          gold.increase = min((0.25-prop.gold)*total.portval,reduction)
+          gold.portval = gold.portval + gold.increase
+          spy.portval = spy.portval-gold.increase
+        }
+      }
+      
+      #Proportion of stocks is less than 25%
+      if(prop.spy < 0.25){
+        increase = 0.25*total.portval - spy.portval
+        
+        if(prop.gold > 0.25){
+          gold.reduction = min((prop.gold-0.25)*total.portval,increase)
+          gold.portval = gold.portval - gold.reduction
+          spy.portval = spy.portval+gold.reduction
+          
+          if(gold.reduction < increase){
+            bond.reduction = min((prop.bond-0.25)*total.portval,increase-gold.reduction)
+            bond.portval = bond.portval - bond.reduction
+            spy.portval = spy.portval+bond.reduction
+            
+            if(gold.reduction + bond.reduction < increase){
+              cash.reduction = min((prop.cash-0.25)*total.portval,increase-gold.reduction-bond.reduction)
+              cash.portval = cash.portval - cash.reduction
+              spy.portval = spy.portval+cash.reduction
+            }
+          }
+        }
+        
+        if(prop.bond < 0.25){
+            bond.reduction = min((prop.bond-0.25)*total.portval,increase)
+            bond.portval = bond.portval - bond.reduction
+            spy.portval = spy.portval+bond.reduction
+            
+            if(bond.reduction < increase){
+              cash.reduction = min((prop.cash-0.25)*total.portval,increase-bond.reduction)
+              cash.portval = cash.portval - cash.reduction
+              spy.portval = spy.portval+cash.reduction
+            }
+        }
+        
+        if(prop.cash < 0.25){
+            cash.reduction = min((prop.cash-0.25)*total.portval,increase)
+            cash.portval = cash.portval - cash.reduction
+            spy.portval = spy.portval+cash.reduction
+        }
+      }
+          
+      avg.yield = total$DGS10[j+i]
+     
+    }
+    
+    
+    fan.diversified[i,j] = spy.portval+bond.portval+cash.portval+gold.portval
+  }
+}
+
+#Calculate returns
+fan.diversified.returns = rep(NA,(dim(total)[1]-252*5))
+for(j in 1:(dim(total)[1]-252*5)){
+  fan.diversified.returns[j] = (fan.diversified[252*5,j]/fan.diversified[1,j])^(1/5)-1
+}
+hist(fan.diversified.returns)
+quantile(fan.diversified.returns,na.rm=T)
+quantile(fan6040.returns)
+quantile(fan,na.rm=T)
+```
+
+```{r}
+#Total Diversified Portfolio (20% Cash, 16% S&P, 16% Gold, 16% Commodities, 16% Real Estate, 16% UST10)
+fan.total.diversified = matrix(data=NA,nrow=252*5,ncol=dim(total)[1]-252*5)
+
+for(j in 1:(dim(total)[1]-252*5)){
+  #Initialize values
+  cash.portval = 20
+  spy.portval = 16
+  gold.portval = 16
+  com.portval = 16
+  re.portval = 16
+  bond.portval = 16
+  
+  avg.yield = total$DGS10[j]
+  
+  for(i in 1:(252*5)){
+    #SPY
+    spy.return = total$SPY.Adjusted[j+i]/total$SPY.Adjusted[j+i-1]-1
+    spy.portval = spy.portval*(1+spy.return)
+    
+    #Gold
+    gold.return = total$gld.return.daily[j+i]
+    gold.portval = gold.portval*(1+gold.return)
+    
+    #Cash
+    cash.daily.return = ((total$DGS3MO[j+i]/100+1)^(1/252)-1)*100
+    cash.portval = cash.portval*(1+cash.daily.return/100)
+    
+    #Commodities
+    com.return = total$dbc.return.daily[j+i]
+    com.portval = com.portval*(1+com.return)
+    
+    #Real Estate
+    re.return = total$re.return.daily[j+i]
+    re.portval = re.portval*(1+re.return)
+    
+    #Bonds - Assume AFS; daily rebalancing
+    #Bond Interest Return
+    bond.portval = bond.portval*(1+total$bond.return.daily[j+i])
+    
+    if(i %% 30 == 1 & i != 1){
+      #Calculate proportions
+      total.portval = spy.portval + gold.portval + cash.portval + bond.portval + re.portval + com.portval
+      
+      prop.spy = spy.portval/total.portval
+      prop.gold = gold.portval/total.portval
+      prop.cash = cash.portval/total.portval
+      prop.bond = bond.portval/total.portval
+      prop.re = re.portval/total.portval
+      prop.com = com.portval/total.portval
+      
+      #Rule: waterfall out highest-risk assets for the lowest-risk assets (e.g. if proportion of stocks goes beyond 25%, switch into cash first, then bonds, then gold); if proportion of stocks goes under 25%, look for leeway in gold first, then bonds, then cash. 
+      #Order (high-to-low risk): RE > Com > SPY > GLD > Bond > Cash
+      
+      #If proportion of stocks is greater than 25%
+      if(prop.re > 0.16){
+        reduction = re.portval-0.16*total.portval
+        
+        if(prop.cash < 0.2){
+          cash.increase = min((0.2-prop.cash)*total.portval,reduction)
+          cash.portval = cash.portval + cash.increase
+          re.portval = re.portval-cash.increase
+          
+          if(cash.increase < reduction){
+            bond.increase = min((0.16-prop.bond)*total.portval,reduction-cash.increase)
+            bond.portval = bond.portval + bond.increase
+            re.portval = re.portval-bond.increase
+            
+            if(cash.increase + bond.increase < reduction){
+              gold.increase = min((0.16-prop.gold)*total.portval,reduction-cash.increase-bond.increase)
+              gold.portval = gold.portval + gold.increase
+              re.portval = re.portval-gold.increase
+              
+              if(cash.increase + bond.increase + gold.increase < reduction){
+              spy.increase = min((0.16-prop.spy)*total.portval,reduction-cash.increase-bond.increase-gold.increase)
+              spy.portval = spy.portval + spy.increase
+              re.portval = re.portval-spy.increase
+              
+                if(cash.increase + bond.increase + gold.increase + spy.increase < reduction){
+                  com.increase = min((0.16-prop.com)*total.portval,reduction-cash.increase-bond.increase-gold.increase-spy.increase)
+                  com.portval = com.portval + com.increase
+                  re.portval = re.portval-com.increase
+                  }
+                }
+              }
+            }
+          }
+      
+        if(prop.bond < 0.16){
+          bond.increase = min((0.16-prop.bond)*total.portval,reduction)
+          bond.portval = bond.portval + bond.increase
+          re.portval = re.portval-bond.increase
+          
+          if(bond.increase < reduction){
+            gold.increase = min((0.16-prop.gold)*total.portval,reduction-bond.increase)
+            gold.portval = gold.portval + gold.increase
+            re.portval = re.portval-gold.increase
+            
+            if(bond.increase + gold.increase < reduction){
+            spy.increase = min((0.16-prop.spy)*total.portval,reduction-bond.increase-gold.increase)
+            spy.portval = spy.portval + spy.increase
+            re.portval = re.portval-spy.increase
+            
+              if(bond.increase + gold.increase + spy.increase < reduction){
+                com.increase = min((0.16-prop.com)*total.portval,reduction-bond.increase-gold.increase-spy.increase)
+                com.portval = com.portval + com.increase
+                re.portval = re.portval-com.increase
+              }
+            }
+          }
+        }
+        
+        if(prop.gold < 0.16){
+          gold.increase = min((0.16-prop.gold)*total.portval,reduction)
+          gold.portval = gold.portval + gold.increase
+          re.portval = re.portval-gold.increase
+          
+          if(gold.increase < reduction){
+          spy.increase = min((0.16-prop.spy)*total.portval,reduction-gold.increase)
+          spy.portval = spy.portval + spy.increase
+          re.portval = re.portval-spy.increase
+          
+            if(gold.increase + spy.increase < reduction){
+              com.increase = min((0.16-prop.com)*total.portval,reduction-gold.increase-spy.increase)
+              com.portval = com.portval + com.increase
+              re.portval = re.portval-com.increase
+            }
+          }
+        }
+        
+        if(prop.spy < 0.16){
+          spy.increase = min((0.16-prop.spy)*total.portval,reduction)
+          spy.portval = spy.portval + spy.increase
+          re.portval = re.portval-spy.increase
+          
+          if(spy.increase < reduction){
+            com.increase = min((0.16-prop.com)*total.portval,reduction-spy.increase)
+            com.portval = com.portval + com.increase
+            re.portval = re.portval-com.increase
+          }
+        }
+        
+        if(prop.com < 0.16){
+            com.increase = min((0.16-prop.com)*total.portval,reduction)
+            com.portval = com.portval + com.increase
+            re.portval = re.portval-com.increase
+        }
+        
+      }
+      
+      #Proportion of stocks is less than 25%
+      if(prop.re < 0.16){
+        increase = 0.16*total.portval - re.portval
+        
+        if(prop.com > 0.16){
+          com.reduction = min((prop.com-0.16)*total.portval,increase)
+          com.portval = com.portval - com.reduction
+          re.portval = re.portval+com.reduction
+          
+          if(com.reduction < increase){
+            spy.reduction = min((prop.spy-0.16)*total.portval,increase-com.reduction)
+            spy.portval = spy.portval - spy.reduction
+            re.portval = re.portval+spy.reduction
+            
+            if(com.reduction + spy.reduction < increase){
+              gold.reduction = min((prop.gold-0.16)*total.portval,increase-com.reduction-spy.reduction)
+              gold.portval = gold.portval - gold.reduction
+              re.portval = re.portval+gold.reduction
+              
+              if(com.reduction + spy.reduction + gold.reduction < increase){
+                bond.reduction = min((prop.bond-0.16)*total.portval,increase-com.reduction-spy.reduction-gold.reduction)
+                bond.portval = bond.portval - bond.reduction
+                re.portval = re.portval+bond.reduction
+                
+                if(com.reduction + spy.reduction + gold.reduction + bond.reduction < increase){
+                  cash.reduction = min((prop.cash-0.2)*total.portval,increase-com.reduction-spy.reduction-gold.reduction-bond.reduction)
+                  cash.portval = cash.portval - cash.reduction
+                  re.portval = re.portval+cash.reduction
+                }
+              }
+            }
+          }
+        }
+  
+        ######
+        if(prop.spy < 0.16){
+          spy.reduction = min((prop.spy-0.16)*total.portval,increase)
+          spy.portval = spy.portval - spy.reduction
+          re.portval = re.portval+spy.reduction
+          
+          if(spy.reduction < increase){
+            gold.reduction = min((prop.gold-0.16)*total.portval,increase-spy.reduction)
+            gold.portval = gold.portval - gold.reduction
+            re.portval = re.portval+gold.reduction
+            
+            if(spy.reduction + gold.reduction < increase){
+              bond.reduction = min((prop.bond-0.16)*total.portval,increase-spy.reduction-gold.reduction)
+              bond.portval = bond.portval - bond.reduction
+              re.portval = re.portval+bond.reduction
+              
+              if(spy.reduction + gold.reduction + bond.reduction < increase){
+                cash.reduction = min((prop.cash-0.2)*total.portval,increase-spy.reduction-gold.reduction-bond.reduction)
+                cash.portval = cash.portval - cash.reduction
+                re.portval = re.portval+cash.reduction
+              }
+            }
+          }
+        }
+        
+        if(prop.gold < 0.16){
+          gold.reduction = min((prop.gold-0.16)*total.portval,increase)
+          gold.portval = gold.portval - gold.reduction
+          re.portval = re.portval+gold.reduction
+          
+          if(gold.reduction < increase){
+            bond.reduction = min((prop.bond-0.16)*total.portval,increase-gold.reduction)
+            bond.portval = bond.portval - bond.reduction
+            re.portval = re.portval+bond.reduction
+            
+            if(gold.reduction + bond.reduction < increase){
+              cash.reduction = min((prop.cash-0.2)*total.portval,increase-gold.reduction-bond.reduction)
+              cash.portval = cash.portval - cash.reduction
+              re.portval = re.portval+cash.reduction
+            }
+          }
+        }
+        
+        if(prop.bond < 0.16){
+          bond.reduction = min((prop.bond-0.16)*total.portval,increase)
+          bond.portval = bond.portval - bond.reduction
+          re.portval = re.portval+bond.reduction
+          
+          if(bond.reduction < increase){
+            cash.reduction = min((prop.cash-0.2)*total.portval,increase-bond.reduction)
+            cash.portval = cash.portval - cash.reduction
+            re.portval = re.portval+cash.reduction
+          }
+        }
+        
+        if(prop.cash < 0.2){
+          cash.reduction = min((prop.cash-0.2)*total.portval,increase)
+          cash.portval = cash.portval - cash.reduction
+          re.portval = re.portval+cash.reduction
+        }
+      }
+          
+      avg.yield = total$DGS10[j+i]
+    }
+    
+    fan.total.diversified[i,j] = spy.portval+bond.portval+cash.portval+gold.portval+re.portval+com.portval
+  }
+}
+
+#Calculate returns
+fan.total.diversified.returns = rep(NA,(dim(total)[1]-252*5))
+for(j in 1:(dim(total)[1]-252*5)){
+  fan.total.diversified.returns[j] = (fan.total.diversified[252*5,j]/fan.total.diversified[1,j])^(1/5)-1
+}
+
+hist(fan)
+hist(fan6040.returns,col="red",add=TRUE)
+hist(fan.diversified.returns,col="blue",add=TRUE)
+hist(fan.total.diversified.returns,col="purple",add=TRUE)
+
+density.fan = density(fan)
+density.6040 = density(fan6040.returns)
+density.diversified = density(fan.diversified.returns)
+density.total.diversified = density(fan.total.diversified.returns)
+
+plot(density.fan,ylim=c(0,17),main="Density Plots of 10-Year Rolling Annualized Returns, 2006-2022")
+lines(density.6040,col="red")
+lines(density.diversified,col="green")
+lines(density.total.diversified,col="purple")
+legend(x=0.175,y=15,legend = c("SPY Only","60-40","Diversified","Total Diversified"),col=c("black","red","green","purple"),lty=1,cex=0.8)
+
+quantile(fan.total.diversified.returns,na.rm=T)
+quantile(fan.diversified.returns,na.rm=T)
+quantile(fan6040.returns)
+quantile(fan,na.rm=T)
+```
+
+```{r}
+#Volatility-Managed (Moreira-Muir / Verdad Research)
+#In continuous-time finance, expected log welath is maximized by investing a fraction (mu / sigma^2), where mu is expected future excess return; sigma^2 is expected future variance
+#Use VIX as an estimator for expected future variance
+#https://www.indexologyblog.com/2013/10/18/turn-vix-into-information-you-can-use/
+
+#Calculate 30-day implied volatility (1 std dev)
+total$vol.implied = (total$VIX.Close/100)/sqrt(12)
+
+#Calculate 30-day implied variance
+total$var.implied = total$vol.implied^2
+
+#Modulate equity holdings by (c/sigma^2), rest put into 3-month T-bills (as proxy for risk-free cash). Scale c by maximum VIX.
+
+
+fan.vol = matrix(data=NA,nrow=252*5,ncol=dim(total)[1]-252*5)
+
+vals = seq(0.01,1,0.2)
+
+returns = rep(NA,length(vals))
+
+c = 0.11*max(total$var.implied)
+
+for(j in 1:(dim(total)[1]-252*5)){
+  spy.portval = 100
+  cash.portval = 0
+
+  for(i in 1:(252*5)){
+    #SPY
+    spy.return = total$SPY.Adjusted[j+i]/total$SPY.Adjusted[j+i-1]-1
+    spy.portval = spy.portval*(1+spy.return)
+    
+    #Cash
+    cash.daily.return = ((total$DGS3MO[j+i]/100+1)^(1/252)-1)*100
+    cash.portval = cash.portval*(1+cash.daily.return/100)
+    
+    #Fractional allocation to equities
+    total.portval = spy.portval+cash.portval
+    prop.spy = spy.portval/total.portval
+    prop.cash = cash.portval/total.portval
+    fraction = min(c/total$var.implied[j+i],1)
+
+    #Rebalance
+    spy.portval = fraction*total.portval
+    cash.portval = (1-fraction)*total.portval
+    
+    #Record
+    fan.vol[i,j] = spy.portval+cash.portval
+  }
+}
+
+#Calculate returns
+fan.vol.returns = rep(NA,(dim(total)[1]-252*5))
+for(j in 1:(dim(total)[1]-252*5)){
+  fan.vol.returns[j] = (fan.vol[252*5,j]/fan.vol[1,j])^(1/5)-1
+}
+
+quantile(fan.vol.returns)
+
+plot(density.fan,ylim=c(0,17),main="Density Plots of 10-Year Rolling Annualized Returns, 2006-2022")
+lines(density.6040,col="red")
+lines(density.diversified,col="green")
+lines(density.total.diversified,col="purple")
+lines(density(fan.vol.returns),col="blue")
+legend(x=0.175,y=15,legend = c("SPY Only","60-40","Diversified","Total Diversified","Volatility-Managed"),col=c("black","red","green","purple","blue"),lty=1,cex=0.8)
+```
+
+Stop loss strategy.
+
+```{r}
+#Stop Loss
+fan.stop = matrix(data=NA,nrow=252*5,ncol=dim(total)[1]-252*5)
+limit = 0.1
+
+for(j in 22:(dim(total)[1]-252*5)){
+  spy.portval = 100
+  cash.portval = 0
+  protection = 0
+
+  for(i in 1:(252*5)){
+    #Rebalance
+    
+    #SPY
+    spy.return = total$SPY.Adjusted[j+i]/total$SPY.Adjusted[j+i-1]-1
+    spy.portval = spy.portval*(1+spy.return)
+    
+    #Cash
+    cash.daily.return = ((total$DGS3MO[j+i]/100+1)^(1/252)-1)*100
+    cash.portval = cash.portval*(1+cash.daily.return/100)
+    
+    if(total$SPY.Adjusted[j+i] < (1-limit)*total$SPY.Adjusted[j+i-22] & protection == 0){
+      #Activate stop-loss; shift into all cash for 22 trading days
+      cash.portval = spy.portval
+      spy.portval = 0
+      protection = 1
+      count = 5
+    }
+    
+    if(protection == 1){
+      count = count-1
+      if(count == 0){
+        protection = 0
+        spy.portval = cash.portval
+        cash.portval = 0
+      }
+    }
+    
+    #Record
+    fan.stop[i,j] = spy.portval+cash.portval
+  }
+}
+
+#Calculate returns
+fan.stop.returns = rep(NA,(dim(total)[1]-252*5))
+for(j in 22:(dim(total)[1]-252*5)){
+  fan.stop.returns[j] = (fan.stop[252*5,j]/fan.stop[1,j])^(1/5)-1
+}
+
+quantile(fan.stop.returns,na.rm=T)
+quantile(fan,na.rm=T)
+```
+
+```{r}
+par(mfrow=c(4,2))
+par(cex=0.7, mai=c(0.3,0.3,0.3,0.3))
+plot(density(fan),main="Market Benchmark",xlab="10-Year Rolling Returns",ylab="Density",ylim=c(0,30))
+
+plot(density(fan),main="60-40",xlab="10-Year Rolling Returns",ylab="Density",ylim=c(0,30))
+lines(density(fan6040.returns),col="blue")
+
+plot(density(fan),main="Risk Parity 1",xlab="10-Year Rolling Returns",ylab="Density",ylim=c(0,30))
+lines(density(fan.diversified.returns),col="blue")
+
+plot(density(fan),main="Risk Parity 2",xlab="10-Year Rolling Returns",ylab="Density",ylim=c(0,30))
+lines(density(fan.total.diversified.returns),col="blue")
+
+plot(density(fan),main="Vol. Managed",xlab="10-Year Rolling Returns",ylab="Density",ylim=c(0,30))
+lines(density(fan.vol.returns),col="blue")
+
+plot(density(fan),main="Tail Risk 1",xlab="10-Year Rolling Returns",ylab="Density",ylim=c(0,30))
+lines(density(fiveyear.return1,na.rm=T),col="blue")
+
+plot(density(fan),main="Tail Risk 2",xlab="10-Year Rolling Returns",ylab="Density",ylim=c(0,30))
+lines(density(fiveyear.return,na.rm=T),col="blue")
+
+plot(density(fan),main="Stop Loss",xlab="10-Year Rolling Returns",ylab="Density",ylim=c(0,30))
+lines(density(fan.stop.returns,na.rm=T),col="blue")
+```
+
+```{r}
+barplot(c(mean(fan6040.returns > fan,na.rm=T),mean(fan.diversified.returns > fan,na.rm=T),mean(fan.total.diversified.returns > fan,na.rm=T),mean(fan.vol.returns > fan,na.rm=T),mean(fiveyear.return1 > cagr.spy,na.rm=T),mean(fiveyear.return[2:19] > cagr.spy,na.rm=T),mean(fan.stop.returns > fan,na.rm=T)),names.arg=bar.names[2:length(bar.names)],main="Fraction of 5-Year Annualized Returns Exceeding Market Benchmark",col=c("grey","tomato","orange","purple","green","turquoise","violet"))
+abline(h=0.5,col="red")
+```
+

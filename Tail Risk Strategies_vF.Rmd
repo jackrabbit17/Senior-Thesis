@@ -1,0 +1,624 @@
+---
+title: "Senior Thesis"
+output: pdf_document
+date: "2023-02-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Read data
+thesis.calls = read.csv("C:/Users/tyoon/Downloads/calloptions.csv")
+thesis.puts = read.csv("C:/Users/tyoon/Downloads/putoptions.csv")
+```
+
+```{r}
+#Extract YYYY, MM, DD from contract date and expiration date
+thesis.calls$year.strike = substr(thesis.calls$date,1,4)
+thesis.calls$month.strike = substr(thesis.calls$date,6,7)
+thesis.calls$day.strike = substr(thesis.calls$date,9,10)
+
+thesis.calls$year.exp = substr(thesis.calls$exdate,1,4)
+thesis.calls$month.exp = substr(thesis.calls$exdate,6,7)
+thesis.calls$day.exp = substr(thesis.calls$exdate,9,10)
+```
+
+```{r}
+#Extract YYYY, MM, DD from contract date and expiration date
+thesis.puts$year.strike = substr(thesis.puts$date,1,4)
+thesis.puts$month.strike = substr(thesis.puts$date,5,6)
+thesis.puts$day.strike = substr(thesis.puts$date,7,8)
+
+thesis.puts$year.exp = substr(thesis.puts$exdate,1,4)
+thesis.puts$month.exp = substr(thesis.puts$exdate,5,6)
+thesis.puts$day.exp = substr(thesis.puts$exdate,7,8)
+```
+
+Extract long-dated European put options.
+
+```{r}
+#Create separate data files for long-dated put options which have annual expiry
+##First, filter out the European put options
+puts = thesis.puts[thesis.puts$cp_flag == "P" & thesis.puts$exercise_style == "E",]
+
+##Convert dates into date class
+puts$date = gsub(" ","",puts$date)
+puts$date.strike = as.Date(puts$date, "%Y%m%d")
+
+puts$exdate = gsub(" ","",puts$exdate)
+puts$date.exp = as.Date(puts$exdate, "%Y%m%d")
+
+puts$strike_price = as.numeric(puts$strike_price)/1000
+```
+
+```{r}
+#Create separate data files for long-dated put options which have annual expiry
+##First, filter out the European put options
+calls = thesis.calls[thesis.calls$cp_flag == "C" & thesis.calls$exercise_style == "E",]
+
+##Convert dates into date class
+calls$date = gsub(" ","",calls$date)
+calls$date.strike = as.Date(calls$date)
+
+calls$exdate = gsub(" ","",calls$exdate)
+calls$date.exp = as.Date(calls$exdate)
+
+calls$strike_price = as.numeric(calls$strike_price)/1000
+```
+
+This block will help us get VIX, SPY data.
+
+```{r,cache=T}
+#Load Quantmod + Dependencies 
+library(quantmod)
+
+#Use Quantmod to get data from 1996 to 2021
+getSymbols("SPY",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+getSymbols("^VIX",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+
+#Create a merged data table of SPY, VIX data
+prices = data.frame(merge(VIX,SPY))
+
+#Calculate daily changes in dividend/split-adjusted SPY values
+prices$return.daily.adjust = rep(NA,nrow(prices))
+for(i in 2:nrow(prices)){
+  prices$return.daily.adjust[i] = prices$SPY.Adjusted[i]/prices$SPY.Adjusted[i-1]-1
+}
+
+#Date column
+prices$date = rownames(prices)
+```
+
+Now, we can repeat this for all other years. Notice if there are any years in which you earn a positive return
+
+```{r}
+#Create a list with all separate yearly dataframes
+#Puts
+years = seq(2000,2021,1)
+range = 22
+puts.all = list()
+for(i in 1:range){
+  temp = puts[puts$year.strike == years[i],]
+  puts.all[[i]] = temp
+}
+names(puts.all) = years
+
+#Calls
+years = seq(2000,2021,1)
+range = 22
+calls.all = list()
+for(i in 1:range){
+  temp = calls[calls$year.strike == years[i],]
+  calls.all[[i]] = temp
+}
+names(calls.all) = years
+```
+
+Returns with fixed $1,000 budget and ideal option strike price determination based on VIX Units.
+
+```{r}
+#Go through each dataframe in the list and calculate abs.return, then record this return in a vector
+returns = rep(NA,range)
+budget = 1000
+liq.prem = 1
+vix.units = 0.25
+for(i in 1:range){
+  #Determine average offer price for puts sold on 1/4/96 and expiring on 12/21/96 for a strike price trading at 2 VIX Unit (%) below
+  first.date = puts.all[[i]]$date.strike[1]
+  first.date.options = puts.all[[i]][puts.all[[i]]$date.strike == first.date,]
+  last.date = max(first.date.options$date.exp)
+  
+  first.weekday = as.integer(format(first.date,'%u'))
+  last.weekday = as.integer(format(last.date,'%u'))
+  
+  first.date.equities = as.Date(ifelse(first.weekday >= 6, first.date + 5 - first.weekday, first.date))
+  last.date.equities = as.Date(ifelse(last.weekday >= 6, last.date + 5 - last.weekday, last.date))
+  
+  spy.init = mean(prices$SPY.Open[prices$date == first.date.equities],prices$SPY.Close[prices$date == first.date.equities])*10
+  vix.init = mean(prices$VIX.Open[prices$date == first.date],prices$VIX.Close[prices$date == first.date])
+  strike.ideal = spy.init*(1-vix.init*vix.units/100)
+  
+  #Option Contract ID of the historical put option which traded closest to the ideal strike price for our transaction
+  rownum = which.min(abs(puts.all[[i]]$strike_price[puts.all[[i]]$date.strike == first.date & puts.all[[i]]$date.exp == last.date] - strike.ideal))
+  option.id = puts.all[[i]]$optionid[puts.all[[i]]$date.strike == first.date & puts.all[[i]]$date.exp == last.date][rownum]
+  
+  #Take this offer price; for now, pretend like there is unlimited liquidity for this particular contract (build in a liquidity premium for now, though)
+  price.contract = puts.all[[i]]$best_offer[puts.all[[i]]$optionid == option.id & puts.all[[i]]$date.strike == first.date]*liq.prem
+  num.contract = floor(budget/price.contract)
+  
+  #Now, find the average offer price for puts sold on the day closest to 12/21/96 at the same strike price
+  contracts = puts.all[[i]][puts.all[[i]]$optionid == option.id & puts.all[[i]]$date.exp == last.date,]
+  price.end = contracts$best_offer[dim(contracts)[1]]
+  abs.return = (price.end-price.contract)*num.contract
+  returns[i] = abs.return
+}
+```
+
+Returns with fixed $1,000 budget and ideal option strike price determination based on fixed OTM percentage.
+
+```{r}
+#Version using OTM %
+#Go through each dataframe in the list and calculate abs.return, then record this return in a vector
+returns = rep(NA,range)
+budget = 1000
+liq.prem = 1 #1 means no liquidity premium
+otm.perc = 0.1
+for(i in 1:range){
+  #Determine average offer price for puts sold on 1/4/96 and expiring on 12/21/96 for a strike price trading at OTM.perc (%) below
+  first.date = puts.all[[i]]$date.strike[1]
+  first.date.options = puts.all[[i]][puts.all[[i]]$date.strike == first.date,]
+  last.date = max(first.date.options$date.exp)
+  spy.init = mean(prices$SPY.Open[prices$date == first.date],prices$SPY.Close[prices$date == first.date])*10
+  vix.init = mean(prices$VIX.Open[prices$date == first.date],prices$VIX.Close[prices$date == first.date])
+  strike.ideal = spy.init*(1-otm.perc)
+  
+  #Option Contract ID of the historical put option which traded closest to the ideal strike price for our transaction
+  rownum = which.min(abs(puts.all[[i]]$strike_price[puts.all[[i]]$date.strike == first.date & puts.all[[i]]$date.exp == last.date] - strike.ideal))
+  option.id = puts.all[[i]]$optionid[puts.all[[i]]$date.strike == first.date & puts.all[[i]]$date.exp == last.date][rownum]
+  
+  #Take this offer price; for now, pretend like there is unlimited liquidity for this particular contract (build in a liquidity premium for now, though)
+  price.contract = puts.all[[i]]$best_offer[puts.all[[i]]$optionid == option.id & puts.all[[i]]$date.strike == first.date]*liq.prem
+  num.contract = floor(budget/price.contract)
+  
+  #Now, find the average offer price for puts sold on the day closest to 12/21/96 at the same strike price
+  contracts = puts.all[[i]][puts.all[[i]]$optionid == option.id & puts.all[[i]]$date.exp == last.date,]
+  price.end = contracts$best_offer[dim(contracts)[1]]
+  abs.return = (price.end-price.contract)*num.contract
+  returns[i] = abs.return
+}
+```
+
+**Returns based on VIX index.**
+
+```{r}
+#Libraries
+library(lubridate)
+
+#Vectors to store data
+option.return = rep(NA,range)
+spy.return = rep(NA,range)
+portfolio.return = rep(NA,range)
+port.val = rep(NA,range)
+spy.val = rep(NA,range)
+  
+#Initial values
+portfolio.value = 10000
+equity.value = 10000
+option.perc = 0.03
+equity.perc = 0.97
+option.budget = portfolio.value*option.perc
+equity.budget = portfolio.value*equity.perc
+liq.prem = 1
+vix.units = 4
+
+#Loop through years
+for(i in 1:(range-1)){
+  #Determine average offer price for puts sold on in the beginning of the year and expiring at the end of the year for a strike price trading at a certain number of VIX units (in %) below the SPY level
+  first.date = puts.all[[i]]$date.strike[which.min(abs(as.Date(paste(years[i],"-01-01",sep=""))-puts.all[[i]]$date.strike))]
+  puts.first = puts.all[[i]][puts.all[[i]]$date.strike == first.date,]
+  last.date = puts.first$date.exp[which.min(abs(as.Date(paste(years[i]+2,"-01-01",sep=""))-puts.first$date.exp))]
+  
+  first.weekday = as.integer(format(first.date,'%u'))
+  last.weekday = as.integer(format(last.date,'%u'))
+  
+  first.date.equities = as.Date(ifelse(first.weekday >= 6, first.date + 4 - first.weekday, first.date))
+  last.date.equities = as.Date(ifelse(last.weekday >= 6, last.date + 4 - last.weekday, last.date))
+  
+  #Date correction
+  if(last.date.equities == "2021-12-31"){
+    last.date.equities = "2021-12-30"
+  }
+  
+  spy.init = mean(prices$SPY.Open[prices$date == first.date.equities],prices$SPY.Close[prices$date == first.date.equities],na.rm=T)*10
+  vix.init = mean(prices$VIX.Open[prices$date == first.date],prices$VIX.Close[prices$date == first.date],na.rm=T)
+  strike.ideal = spy.init*(1-vix.init*vix.units/100)
+  
+  #Option Contract ID of the historical put option which traded closest to the ideal strike price for our transaction
+  rownum = which.min(abs(puts.all[[i]]$strike_price[puts.all[[i]]$date.strike == first.date & puts.all[[i]]$date.exp == last.date] - strike.ideal))
+  option.id = puts.all[[i]]$optionid[puts.all[[i]]$date.strike == first.date & puts.all[[i]]$date.exp == last.date][rownum]
+  
+  #Take this offer price; build in a liquidity premium (liq.prem)
+  price.contract = puts.all[[i]]$best_offer[puts.all[[i]]$optionid == option.id & puts.all[[i]]$date.strike == first.date]*liq.prem
+  num.contract = floor(option.budget/price.contract)
+  
+  #Now, find the average offer price for puts sold on the day closest to 1/1/97 at the same strike price
+  puts.limited = puts.all[[i]][puts.all[[i]]$optionid == option.id,]
+  rebalance.date = puts.limited$date.strike[which.min(abs(as.Date(paste(years[i]+1,"-01-01",sep=""))-puts.limited$date.strike))]
+
+  contracts = puts.all[[i]][puts.all[[i]]$optionid == option.id & puts.all[[i]]$date.strike == rebalance.date,]
+  price.end = contracts$best_offer[dim(contracts)[1]]
+  abs.return = (price.end-price.contract)*num.contract
+  
+  #Save data
+  option.return[i] = abs.return/option.budget
+  spy.return[i] = prices$SPY.Close[prices$date == last.date.equities]/prices$SPY.Open[prices$date == first.date.equities]-1
+  
+  #Update portfolio and budget data
+  portfolio.return[i] = (option.budget*(1+option.return[i])+equity.budget*(1+spy.return[i]))/portfolio.value-1
+  
+  #Rebalance budgets for options and equities
+  portfolio.value = option.budget*(1+option.return[i])+equity.budget*(1+spy.return[i])
+  equity.budget = portfolio.value*equity.perc
+  option.budget = portfolio.value*option.perc
+  
+  port.val[i] = portfolio.value
+  spy.val[i] = equity.value*(1+spy.return[i])
+  equity.value = spy.val[i]
+}
+
+#Chart
+plot(years,spy.val,type="l")
+lines(years,port.val,col="blue")
+```
+
+**Returns based on absolute % deviation from S&P level. (works best)**
+
+```{r}
+#Libraries
+library(lubridate)
+library(birk)
+
+#Vectors to store data
+option.return = rep(NA,range)
+spy.return = rep(NA,range)
+portfolio.return = rep(NA,range)
+port.val = rep(NA,range)
+spy.val = rep(NA,range)
+  
+#Initial values
+portfolio.value = 10000
+equity.value = 10000
+option.perc = 0.08
+equity.perc = 0.92
+option.budget = portfolio.value*option.perc
+equity.budget = portfolio.value*equity.perc
+liq.prem = 1.2
+spy.dev = 0.6
+
+#Storage for graphs
+put.graphs = list()
+
+#Loop through years
+for(i in 1:23){
+  port.val[i] = portfolio.value
+  spy.val[i] = equity.value
+  
+  if(i==23){
+    break
+  }
+  
+  #Determine average offer price for puts sold on in the beginning of the year and expiring at the end of the year for a strike price trading at a certain number of VIX units (in %) below the SPY level
+  first.date = puts.all[[i]]$date.strike[which.min(abs(as.Date(paste(years[i+1],"-01-01",sep=""))-puts.all[[i]]$date.strike))]
+  puts.first = puts.all[[i]][puts.all[[i]]$date.strike == first.date,]
+  last.date = puts.first$date.exp[which.min(abs(as.Date(paste(years[i+1]+2,"-01-01",sep=""))-puts.first$date.exp))]
+  
+  first.weekday = as.integer(format(first.date,'%u'))
+  first.date.equities = as.Date(ifelse(first.weekday >= 6, first.date + 4 - first.weekday, first.date))
+  
+  if(i == 1){
+    spy.init = prices$SPY.Adjusted[1]*10
+    vix.init = prices$VIX.Adjusted[1]
+  }
+  else{
+    spy.init = prices$SPY.Adjusted[prices$date == first.date.equities]*10
+    vix.init = prices$VIX.Adjusted[prices$date == first.date.equities]
+  }
+  
+  strike.ideal = spy.init*(1-spy.dev)
+  
+  #Option Contract ID of the historical put option which traded closest to the ideal strike price for our transaction
+  rownum = which.min(abs(puts.all[[i]]$strike_price[puts.all[[i]]$date.strike == first.date & puts.all[[i]]$date.exp == last.date] - strike.ideal))
+  option.id = puts.all[[i]]$optionid[puts.all[[i]]$date.strike == first.date & puts.all[[i]]$date.exp == last.date][rownum]
+  
+  #Take this offer price; build in a liquidity premium (liq.prem)
+  price.contract = puts.all[[i]]$best_offer[puts.all[[i]]$optionid == option.id & puts.all[[i]]$date.strike == first.date]*liq.prem
+  num.contract = floor(option.budget/price.contract)
+  
+  #Now, find the average offer price for puts sold on the day closest to 1/1/97 at the same strike price
+  puts.limited = puts.all[[i]][puts.all[[i]]$optionid == option.id,]
+  rebalance.date = puts.limited$date.strike[which.min(abs(as.Date(paste(years[i+1]+1,"-01-01",sep=""))-puts.limited$date.strike))]
+  
+  #Time manipulation
+  rebalance.weekday = as.integer(format(rebalance.date,'%u'))
+  
+  last.date.equities = as.Date(ifelse(rebalance.weekday >= 6, rebalance.date + 4 - rebalance.weekday, rebalance.date))
+  
+
+  #Date correction
+  if(last.date.equities == "2021-12-31"){
+    last.date.equities = "2021-12-30"
+  }
+  
+  #Contracts
+  contracts = puts.all[[i]][puts.all[[i]]$optionid == option.id & puts.all[[i]]$date.strike == rebalance.date,]
+  price.end = contracts$best_offer[dim(contracts)[1]]
+  abs.return = (price.end-price.contract)*num.contract
+
+  #Save data
+  option.return[i] = abs.return/option.budget
+  
+  if(i == 1){
+    spy.return[i] = prices$SPY.Adjusted[254]/prices$SPY.Adjusted[1]-1
+  }
+  else{
+    spy.return[i] = prices$SPY.Adjusted[prices$date == last.date.equities]/prices$SPY.Adjusted[prices$date == first.date.equities]-1
+  }
+  
+  #Update portfolio and budget data
+  portfolio.return[i] = (option.budget*(1+option.return[i])+equity.budget*(1+spy.return[i]))/portfolio.value-1
+  
+  #Rebalance budgets for options and equities
+  portfolio.value = option.budget*(1+option.return[i])+equity.budget*(1+spy.return[i])
+  equity.value = equity.value*(1+spy.return[i])
+  equity.budget = portfolio.value*equity.perc
+  option.budget = portfolio.value*option.perc
+  
+  #Save data for put graphs 
+  temp = puts.all[[i]][puts.all[[i]]$optionid == option.id,]
+  temp = data.frame(as.Date(temp$date.strike),temp$best_offer)
+  prices.temp = data.frame(as.Date(prices$date),prices$VIX.Close)
+  colnames(temp) = c("date.strike","best_offer")
+  colnames(prices.temp) = c("date","vix")
+  temp = merge(temp,prices.temp,by.x="date.strike",by.y="date")
+  put.graphs[[i]] = temp
+}
+
+#Chart
+plot(years,spy.val,type="l",main="Value of $10,000 Invested in SPY vs. Tail Risk Strategy 1, 2000-2021",xlab="Years",ylab="Value of Initial $10,000 Investment")
+lines(years,port.val,col="blue")
+legend(x=2000,y=40000,legend = c("SPY","Tail Risk 1"),col=c("black","blue"),lty=1,cex=0.8)
+
+#Graphs of Option Prices vs. VIX before rebalancing
+library(ggplot2)
+for(i in 1:range){
+  ggplot(put.graphs[[i]], aes(x=date.strike)) +
+    geom_line(aes(y=best_offer)) + 
+    geom_line(aes(y=vix),color="blue") + 
+    scale_y_continuous(
+      name = "Option Offer Price",
+      sec.axis = sec_axis(~.,name="VIX")
+    )
+}
+
+#Insights: the failure of the put option strategy in 2001 is largely due to timing issues. Try buying protection when VIX < 0.20289 (long-term average); exit at one of two points - if VIX is 2 standard deviations over the long-term average (37.08493 or higher; std.dev of 8.397901); or if the year ends before that. Obviously, you have to cycle through daily values, but you can just use the strike dates in the option table for your particular option ID (which introduces the prospect of missing certain days when VIX is 2 standard deviations over or below 20...but just try it for now).
+#Calculate rolling 5-year returns
+
+#Calculate yearly returns
+yearlyreturns = rep(NA,(range-1))
+for(i in 1:(range-1)){
+  yearlyreturns[i+1]=port.val[i+1]/port.val[i]-1
+}
+
+spyyearlyreturns = rep(NA,(range-1))
+for(i in 1:(range-1)){
+  spyyearlyreturns[i+1]=spy.val[i+1]/spy.val[i]-1
+}
+
+
+fiveyear.return = rep(NA,length(yearlyreturns)-5)
+fiveyear.spy.return = rep(NA,length(yearlyreturns)-5)
+for(i in 2:(length(yearlyreturns)-4)){
+  fiveyear.return[i] = ((1+yearlyreturns[i])*(1+yearlyreturns[i+1])*(1+yearlyreturns[i+2])*(1+yearlyreturns[i+3])*(1+yearlyreturns[i+4]))^(1/5)-1
+  fiveyear.spy.return[i] = ((1+spyyearlyreturns[i])*(1+spyyearlyreturns[i+1])*(1+spyyearlyreturns[i+2])*(1+spyyearlyreturns[i+3])*(1+spyyearlyreturns[i+4]))^(1/5)-1
+}
+
+#Calculate rolling 10-year returns
+tenyear.return = rep(NA,length(yearlyreturns)-10)
+tenyear.spy.return = rep(NA,length(yearlyreturns)-10)
+for(i in 2:(length(yearlyreturns)-9)){
+  tenyear.return[i] = ((1+yearlyreturns[i])*(1+yearlyreturns[i+1])*(1+yearlyreturns[i+2])*(1+yearlyreturns[i+3])*(1+yearlyreturns[i+4])*(1+yearlyreturns[i+5])*(1+yearlyreturns[i+6])*(1+yearlyreturns[i+7])*(1+yearlyreturns[i+8])*(1+yearlyreturns[i+9]))^(1/10)-1
+  tenyear.spy.return[i] = ((1+spyyearlyreturns[i])*(1+spyyearlyreturns[i+1])*(1+spyyearlyreturns[i+2])*(1+spyyearlyreturns[i+3])*(1+spyyearlyreturns[i+4])*(1+spyyearlyreturns[i+5])*(1+spyyearlyreturns[i+6])*(1+spyyearlyreturns[i+7])*(1+spyyearlyreturns[i+8])*(1+spyyearlyreturns[i+9]))^(1/10)-1
+}
+
+fiveyear.return1 = fiveyear.return
+tenyear.return1 = tenyear.return
+```
+
+**Timing with VIX.**
+
+```{r}
+#Libraries
+library(lubridate)
+library(birk)
+
+#Vectors to store data
+option.return = rep(NA,range)
+spy.return = rep(NA,range)
+portfolio.return = rep(NA,range)
+port.val = rep(NA,range)
+spy.val = rep(NA,range)
+  
+#Initial values
+portfolio.value = 10000
+equity.value = 10000
+option.perc = 0.08
+equity.perc = 1-option.perc
+option.budget = portfolio.value*option.perc
+equity.budget = portfolio.value*equity.perc
+liq.prem = 1.2
+spy.dev = 0.6
+
+prices$year = substr(prices$date,1,4)
+
+#VIX Values
+vix.mean = mean(prices$VIX.Close,na.rm=T)
+vix.sdev = sd(prices$VIX.Close,na.rm=T)
+vix.lower = 20
+vix.upper = 70
+
+strikes = c()
+strikes.real = c()
+currs = c()
+
+#Loop through years
+for(i in 1:23){
+  spy.val[i] = equity.value
+  port.val[i] = portfolio.value
+  
+  if(i == 23){
+    break
+  }
+  
+  puts.yearly = puts.all[[i]]
+  vix.yearly = prices[prices$year == years[i+1],]
+  num.contract = 0
+  price.contract = 0
+  protection = 0
+  profit = 0
+  temp.option.budget = option.budget
+  
+  for(j in 1:dim(vix.yearly)[1]){
+    #If we lose all of our money for portfolio protection, don't invest anymore
+    
+    
+    if(vix.yearly$VIX.Close[j] < vix.lower & protection == 0 & temp.option.budget > 0){
+      #Take on protection (search for options with strike date on or closest after this date that are closest to 60% OTM)
+      #First, tabulate options with strike price closest to 60% OTM
+      spy.current = vix.yearly$SPY.Close[j]*10
+      strike.ideal = spy.current*(1-spy.dev)
+      
+      #Find puts which traded on this day
+      first.date = puts.yearly$date.strike[which.min(abs(as.Date(vix.yearly$date[j])-puts.yearly$date.strike))]
+      puts.first = puts.yearly[puts.yearly$date.strike == first.date,]
+      
+      #Last date is two years from now
+      last.date = puts.first$date.exp[which.closest((as.Date(vix.yearly$date[j])+years(2)),puts.first$date.exp)]
+      
+      #Option Contract ID of the historical put option which traded closest to the ideal strike price for our transaction
+      rownum = which.min(abs(puts.yearly$strike_price[puts.yearly$date.strike == first.date & puts.yearly$date.exp == last.date] - strike.ideal))
+      option.id = puts.yearly$optionid[puts.yearly$date.strike == first.date & puts.yearly$date.exp == last.date][rownum]
+      
+      #Take this offer price; build in a liquidity premium (liq.prem)
+      price.contract = puts.yearly$best_offer[puts.yearly$optionid == option.id & puts.yearly$date.strike == first.date]*liq.prem
+      num.contract = floor(temp.option.budget/price.contract)
+      
+      strikes.real = c(strikes.real, puts.yearly$strike_price[puts.yearly$optionid == option.id & puts.yearly$date.strike == first.date])
+      
+      #Switch protection on
+      protection = 1
+      dates = c(dates,j)
+      
+      #Create a dataframe for the price of this option exclusively
+      my.option = puts.yearly[puts.yearly$optionid == option.id & puts.yearly$date.exp == last.date,]
+    }
+    
+    #Having taken on protection, we need to watch out for selling opportunities (earlier of 2*VIX Std. Dev movement or end of year rebalancing)
+    if(vix.yearly$VIX.Close[j] > vix.upper & protection == 1 & temp.option.budget > 0){
+      #Find the price of the option contract on this particular day, or nearest to the day
+      #Find the nearest day 
+      distance = as.Date(vix.yearly$date[j])-my.option$date.strike
+      sell.date = my.option$date.strike[which.min(abs(distance))]
+      
+      #Look up price on the sell date
+      price.sale = my.option$best_offer[my.option$date.strike == sell.date]*liq.prem
+      profit = (price.sale-price.contract)*num.contract + profit
+      
+      profits = c(profits,profit)
+      temp.option.budget = temp.option.budget + profit
+      
+      #Switch off protection
+      protection = 0
+    }
+    
+    #Watch out for the end of the year
+    if(j == dim(vix.yearly)[1] & protection == 1 & temp.option.budget > 0){
+      #Find the price of the option contract on this particular day, or nearest to the day
+      #Find the nearest day 
+      distance = as.Date(vix.yearly$date[j])-my.option$date.strike
+      sell.date = my.option$date.strike[which.min(abs(distance))]
+      
+      #Look up price on the sell date
+      price.sale = my.option$best_offer[my.option$date.strike == sell.date]*liq.prem
+      profit = (price.sale-price.contract)*num.contract + profit
+      
+      profits = c(profits,profit)
+      temp.option.budget = temp.option.budget + profit
+      
+      #Switch off protection
+      protection = 0
+    }
+  }
+  
+  #Tally up the profits for the year
+  spy.return = vix.yearly$SPY.Adjusted[dim(vix.yearly)[1]]/vix.yearly$SPY.Adjusted[1]-1
+  equity.value = equity.value*(1+spy.return)
+
+  equity.budget = equity.budget*(1+spy.return)
+  option.return[i] = (option.budget+profit)/option.budget-1
+  option.budget = option.budget+profit
+  portfolio.value = equity.budget + option.budget
+  
+  equity.budget = portfolio.value*equity.perc
+  option.budget = portfolio.value*option.perc
+}
+
+#Chart
+plot(years,spy.val,type="l",main="SPY vs. Tail Risk Strategy 2 with 20% Liquidity Premium, 2000-2021",xlab="Years",ylab="Value of Initial $10,000 Investment",ylim=c(0,90000))
+lines(years,port.val,col="blue")
+legend(x=2000,y=40000,legend = c("SPY","Tail Risk 2"),col=c("black","blue"),lty=1,cex=0.8)
+
+#Calculate yearly returns
+yearlyreturns = rep(NA,(range))
+for(i in 1:(range)){
+  yearlyreturns[i+1]=port.val[i+1]/port.val[i]-1
+}
+
+spyyearlyreturns = rep(NA,(range))
+for(i in 1:(range)){
+  spyyearlyreturns[i+1]=spy.val[i+1]/spy.val[i]-1
+}
+
+#Calculate rolling 5-year returns
+fiveyear.return = rep(NA,length(yearlyreturns)-5)
+fiveyear.spy.return = rep(NA,length(yearlyreturns)-5)
+for(i in 2:(length(yearlyreturns)-4)){
+  fiveyear.return[i] = ((1+yearlyreturns[i])*(1+yearlyreturns[i+1])*(1+yearlyreturns[i+2])*(1+yearlyreturns[i+3])*(1+yearlyreturns[i+4]))^(1/5)-1
+  fiveyear.spy.return[i] = ((1+spyyearlyreturns[i])*(1+spyyearlyreturns[i+1])*(1+spyyearlyreturns[i+2])*(1+spyyearlyreturns[i+3])*(1+spyyearlyreturns[i+4]))^(1/5)-1
+}
+
+#Calculate rolling 10-year returns
+tenyear.return = rep(NA,length(yearlyreturns)-10)
+tenyear.spy.return = rep(NA,length(yearlyreturns)-10)
+for(i in 2:(length(yearlyreturns)-9)){
+  tenyear.return[i] = ((1+yearlyreturns[i])*(1+yearlyreturns[i+1])*(1+yearlyreturns[i+2])*(1+yearlyreturns[i+3])*(1+yearlyreturns[i+4])*(1+yearlyreturns[i+5])*(1+yearlyreturns[i+6])*(1+yearlyreturns[i+7])*(1+yearlyreturns[i+8])*(1+yearlyreturns[i+9]))^(1/10)-1
+  tenyear.spy.return[i] = ((1+spyyearlyreturns[i])*(1+spyyearlyreturns[i+1])*(1+spyyearlyreturns[i+2])*(1+spyyearlyreturns[i+3])*(1+spyyearlyreturns[i+4])*(1+spyyearlyreturns[i+5])*(1+spyyearlyreturns[i+6])*(1+spyyearlyreturns[i+7])*(1+spyyearlyreturns[i+8])*(1+spyyearlyreturns[i+9]))^(1/10)-1
+}
+
+quantile(yearlyreturns,na.rm=T)
+quantile(spyyearlyreturns,na.rm=T)
+quantile(fiveyear.return,na.rm=T)
+quantile(fiveyear.spy.return,na.rm=T)
+quantile(tenyear.return,na.rm=T)
+quantile(tenyear.spy.return,na.rm=T)
+```
+
+
+

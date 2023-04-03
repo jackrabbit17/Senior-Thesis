@@ -1,0 +1,631 @@
+---
+title: "Thesis Simulation"
+author: "Jack Yoon"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage
+
+\section{Data and Libraries}
+
+```{r,cache=T}
+#Load Libraries 
+library(quantmod)
+library(ggplot2)
+library(coda)
+
+#Use Quantmod to get data from 2000 to 2021
+getSymbols("SPY",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+getSymbols("^VIX",
+           from = "2000/01/07",
+           to = "2021/12/31",
+           periodicity = "daily")
+
+#Create a merged data table of SPY, VIX data
+total = data.frame(merge(VIX,SPY))
+
+#Calculate daily changes in dividend/split-adjusted SPY values
+total$return.daily.adjust = rep(NA,nrow(total))
+for(i in 2:nrow(total)){
+  total$return.daily.adjust[i] = total$SPY.Adjusted[i]/total$SPY.Adjusted[i-1]-1
+}
+```
+
+\newpage
+
+\section{Simulation: Block Resampling with Time Dependence}
+
+```{r,cache=T}
+set.seed(98)
+
+#Initial conditions
+ndays = c(252*12)
+ntimelines = 100
+block.size = 15
+block.num = floor(ndays/block.size)
+otm = 0.6 #OTM degree
+equity.perc = 0.92
+option.perc = 0.08
+
+#Upper and lower bounds for the VIX during conditional resampling of S&P500 (SPY) value
+lambda = c(1)
+
+#Final list of results
+returns.final = list()
+vix.final = list()
+invest.final = list()
+
+#Black-Scholes algorithm (https://financetrain.com/black-scholes-options-pricing-model-in-r)
+bs <- function(S, K, r, T, sig, type){
+  
+  if(type=="C"){
+    d1 <- (log(S/K) + (r + sig^2/2)*T) / (sig*sqrt(T))
+    d2 <- d1 - sig*sqrt(T)
+    
+    value <- S*pnorm(d1) - K*exp(-r*T)*pnorm(d2)
+    return(value)
+  }
+  
+  if(type=="P"){
+    d1 <- (log(S/K) + (r + sig^2/2)*T) / (sig*sqrt(T))
+    d2 <- d1 - sig*sqrt(T)
+    
+    value <-  (K*exp(-r*T)*pnorm(-d2) - S*pnorm(-d1))
+    return(value)
+  }
+}
+
+#Vary the number of trading days, ndays
+for(n in 1:length(ndays)){
+  
+  #Vary the bound, lambda, of VIX values on which conditional resampling is based
+  for(l in 1:length(lambda)){
+    
+    #Create result matrices to store data
+    results.returns = matrix(NA,nrow=ndays[n],ncol=ntimelines)
+    results.vix = matrix(NA,nrow=ndays[n],ncol=ntimelines)
+    results.options = matrix(NA,nrow=ndays[n],ncol=ntimelines)
+    results.invest = matrix(NA,nrow=ndays[n]+1,ncol=ntimelines)
+    
+    #Begin looping through different "timelines"
+    for(t in 1:ntimelines){
+      
+      #Create empty vectors to store return and VIX values
+      return.vals = rep(NA,ndays[n])
+      vix.vals = rep(NA,ndays[n])
+      invest.vals = rep(NA,ndays[n]+1)
+  
+      #Sample an initial starting index
+      index.initial = sample(length(total$VIX.Close)-block.size,1)
+      vix.vals[1:(block.size)] = total$VIX.Close[(index.initial):(index.initial+block.size-1)]
+      
+      #Calculate all daily VIX values based on block resampling
+      for(i in 2:block.num[n]){
+        
+        #Set bounds for VIX values
+        vix.lower = vix.vals[(block.size*(i-1))]-lambda[l]
+        vix.upper = vix.vals[(block.size*(i-1))]+lambda[l]
+        
+        #Next day VIX values corresponding to these values
+        currentday.index = which(total$VIX.Close[1:(length(total$VIX.Close)-block.size)] > vix.lower & total$VIX.Close[1:(length(total$VIX.Close)-block.size)] < vix.upper)
+        nextday.index = currentday.index+1
+        
+        #Sample an index value from the list of next day indices
+        nextblock.index = nextday.index[sample(length(nextday.index),1)]
+        
+        #Fill in values for a particular block by referring to the historical VIX data
+        vix.vals[((i-1)*block.size+1):((i-1)*block.size+block.size)] = total$VIX.Close[(nextblock.index):(nextblock.index+block.size-1)]
+        
+        #For situations where ndays aren't perfectly divisible by block size
+        if(i == block.num[n] & is.na(vix.vals[length(vix.vals)])){
+          
+          #Calculate values left to fill
+          vals.left = sum(is.na(vix.vals[length(vix.vals)]))
+          
+          #Sample an initial starting index
+          index.initial = sample(length(total$VIX.Close)-block.size,1)
+          
+          #Fill in remaining values for the VIX 
+          vix.vals[((i)*block.size+1):length(vix.vals)] = total$VIX.Close[(index.initial):(index.initial+vals.left-1)]
+        }
+        
+      }
+      
+      #Set lower and upper bounds for the VIX
+      lower.vix = vix.vals[1]-lambda[l]
+      upper.vix = vix.vals[1]+lambda[l]
+      
+      #Specify for which day indices the VIX was between lower and upper bounds
+      indices = which(total$VIX.Close > lower.vix & total$VIX.Close < upper.vix)
+        
+      #Sample a return value from the conditional distribution of SPY for a particular value of VIX
+      return.vals[1] = total$return.daily.adjust[indices[sample(length(indices),1)]]
+      
+      #Calculate daily stock return values by performing conditional resampling, based on VIX values on particular days
+      for(i in 2:length(vix.vals)){
+        
+        #Set lower and upper bounds for the VIX
+        lower.vix = vix.vals[i]-lambda[l]
+        upper.vix = vix.vals[i]+lambda[l]
+        
+        #Specify for which day indices the VIX was between lower and upper bounds
+        indices = which(total$VIX.Close > lower.vix & total$VIX.Close < upper.vix)
+        
+        #Next day values
+        next.indices = indices+1
+        
+        #Check if these don't go out of index range
+        if(max(next.indices)>length(total$return.daily.adjust)){
+          next.indices = next.indices[1:(length(next.indices)-1)]
+        }
+        
+        #Sample a return value from the conditional distribution of SPY for a particular value of VIX
+        return.vals[i] = total$return.daily.adjust[next.indices[sample(length(next.indices),1)]]
+        
+      }
+    
+      #Plug in the returns and VIX values from a particular timeline (t) into a column of the results matrix
+      results.returns[,t] = return.vals
+      results.vix[,t] = vix.vals
+    
+      #Calculate returns for a standard $1000 investment
+      invest.vals[1] = 1000
+      
+      for(d in 1:ndays[n]){
+        invest.vals[d+1] = invest.vals[d]*(1+results.returns[d,t])
+        
+        if(invest.vals[d+1]==0){
+          break
+        }
+      }
+      
+      #Now we have a list of S&P500 index levels and corresponding VIX levels
+      total.portval2 = rep(NA,ndays[n]-1)
+      total.portval2[1] = 1000
+      equity.portval = total.portval2[1]*equity.perc
+      option.portval = total.portval2[1]*option.perc
+      temp.option.budget = option.portval
+      num.contract = 0
+      price.contract = 0
+      protection = 0
+      profit = 0
+      vix.lower = 20
+      vix.upper = 70
+      mark.day = 1
+      
+      for(d in 2:ndays[n]){
+        equity.portval = equity.portval*invest.vals[d]/invest.vals[d-1]
+        
+        if(vix.vals[d] < 20 & protection == 0 & temp.option.budget > 0){
+          #Take on protection (calculate option price for 60% OTM)
+          price.contract = bs(invest.vals[d],invest.vals[d]*(1-otm),0.0217,2,vix.vals[d]/100,"P")
+          mark.day = d
+          
+          #Take this offer price; build in a liquidity premium (liq.prem)
+          num.contract = floor(temp.option.budget/price.contract)
+          
+          #Switch protection on
+          protection = 1
+        }
+        
+        #Having taken on protection, we need to watch out for selling opportunities (earlier of 2*VIX Std. Dev movement or end of year rebalancing)
+        if(vix.vals[d] > vix.upper & protection == 1 & temp.option.budget > 0 & d-mark.day < 252*2){
+          #How far are we from the mark.day? (if we're above 365, then we need to cut prematurely)
+          price.sale = bs(invest.vals[d],invest.vals[mark.day]*(1-otm),0.0217,(d-mark.day)/252,vix.vals[d]/100,"P")
+          
+          #Look up price on the sell date
+          profit = (price.sale-price.contract)*num.contract + profit
+          temp.option.budget = temp.option.budget + profit
+          
+          total.portval = equity.portval + temp.option.budget
+          equity.portval = total.portval*equity.perc
+          option.portval = total.portval*option.perc
+          temp.option.budget = option.portval
+          
+          #Switch off protection
+          protection = 0
+          profit = 0
+        }
+        
+        #Watch out for the end of the year
+        if(d-mark.day == 252*2 & protection == 1 & temp.option.budget > 0){
+          #Find the price of the option contract on this particular day, or nearest to the day
+          price.sale = bs(invest.vals[d],invest.vals[mark.day]*(1-otm),0.0217,0,vix.vals[d]/100,"P")
+          
+          #Look up price on the sell date
+          profit = (price.sale-price.contract)*num.contract + profit
+          temp.option.budget = temp.option.budget + profit
+          
+          total.portval = equity.portval + temp.option.budget
+          equity.portval = total.portval*equity.perc
+          option.portval = total.portval*option.perc
+          temp.option.budget = option.portval
+          
+          #Switch off protection
+          protection = 0
+          profit = 0
+        }
+        
+        total.portval2[d] = equity.portval + option.portval
+      }
+      
+      
+      #Plug in return values for $1000 investment from a particular timeline (t) into a column of the final results matrix, results.invest
+      results.invest[,t] = invest.vals
+      results.options[,t] = total.portval2
+    }
+    
+    #Append result matrices to list of final results
+    returns.final[[((which(ndays == ndays[n])-1)*length(lambda)+which(lambda == lambda[l]))]] = results.returns
+    
+    vix.final[[((which(ndays == ndays[n])-1)*length(lambda)+which(lambda == lambda[l]))]] = results.vix
+    
+    invest.final[[((which(ndays == ndays[n])-1)*length(lambda)+which(lambda == lambda[l]))]] = results.invest
+    
+    #Rename list elements
+    names(returns.final)[((which(ndays == ndays[n])-1)*length(lambda)+which(lambda == lambda[l]))] = paste(ndays[n]," trading days and ",lambda[l]," bounds")
+    
+    names(vix.final)[((which(ndays == ndays[n])-1)*length(lambda)+which(lambda == lambda[l]))] = paste(ndays[n]," trading days and ",lambda[l]," bounds")
+    
+    names(invest.final)[((which(ndays == ndays[n])-1)*length(lambda)+which(lambda == lambda[l]))] = paste(ndays[n]," trading days and ",lambda[l]," bounds")
+    
+  }
+}
+```
+
+```{r}
+#Calculate 10-Year CAGR for each simulation
+cagr.index = rep(NA,100)
+cagr.options = rep(NA,100)
+for(i in 1:100){
+  cagr.index[i] = (results.invest[,i][252*5]/results.invest[,i][1])^(1/5)-1
+  cagr.options[i] = (results.options[,i][252*5]/results.options[,i][1])^(1/5)-1
+}
+
+tenyear.options.sim = quantile(cagr.options)
+tenyear.index.sim = quantile(cagr.index)
+tenyear.diff.sim = quantile(cagr.options)-quantile(cagr.index)
+
+fiveyear.options.sim = quantile(cagr.options)
+fiveyear.index.sim = quantile(cagr.index)
+fiveyear.diff.sim = quantile(cagr.options)-quantile(cagr.index)
+
+
+plot(results.options[,30],type="l",main="The Source of Extraordinary Returns: High-Vol Scenarios",xlab="Time",ylab="Portfolio Value (Initial = $1,000)")
+par(new = TRUE)                             # Add new plot
+plot(results.vix[,30], type="l", col = "red",              # Create second plot without axes
+     axes = FALSE, xlab = "",ylab=" ")
+axis(side = 4, at = pretty(range(results.vix)))      # Add second axis
+mtext("y2", side = 4, line = 3)
+
+```
+
+\subsection{Results}
+
+\subsubsection{Similarity to True S\&P500 and VIX}
+
+**Distribution**
+
+```{r,warning=F,cache=T}
+### KS Tests
+
+#Calculate p-values for KS tests of simulated S&P500 data
+temp = rep(NA,length(returns.final))
+pval=list()
+for(i in 1:length(returns.final)){
+  pval[[i]]=rep(NA,dim(returns.final[[i]])[2])
+  for(j in 1:dim(returns.final[[i]])[2]){
+    pval[[i]][j]=ks.test(returns.final[[i]][,j],total$return.daily.adjust)$p.value
+  }
+  temp[i] = mean(pval[[i]])
+}
+
+#Results matrix
+pvals = matrix(temp,nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(pvals) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(pvals) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+pvals
+
+#Calculate p-values for KS tests of simulated S&P500 data
+temp = rep(NA,length(vix.final))
+pval=list()
+for(i in 1:length(vix.final)){
+  pval[[i]]=rep(NA,dim(vix.final[[i]])[2])
+  for(j in 1:dim(vix.final[[i]])[2]){
+    pval[[i]][j]=ks.test(vix.final[[i]][,j],total$VIX.Close)$p.value
+  }
+  temp[i] = mean(pval[[i]])
+}
+
+#Results matrix
+pvals = matrix(temp,nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(pvals) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(pvals) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+pvals
+
+### QQ Plots
+
+#Key for reading the QQ Plot graph labels: scenario "i" corresponds to the following conditions
+key = matrix(rep(1:16),nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(key) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(key) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+key
+
+#Plot QQ plots for simulated S&P500 data
+conditions = sample(length(returns.final),2,replace=F)
+simulations = sample(dim(returns.final[[i]])[2],2,replace=F)
+for(i in conditions){
+  for(j in simulations){
+    qqplot(total$return.daily.adjust,returns.final[[i]][,j],xlab="Historical Returns",ylab="Simulated Returns",main=paste("Method 1 QQ Plot Scenario",i,"Simulation",j))
+  }
+}
+
+#Plot QQ plots for simulated VIX data
+qqplot(total$VIX.Close,vix.final[[13]][,77],xlab="Historical VIX",ylab="Simulated VIX",main=paste("Method 1 QQ Plot Scenario",13,"Simulation",77))
+qqplot(total$VIX.Close,vix.final[[16]][,77],xlab="Historical VIX",ylab="Simulated VIX",main=paste("Method 1 QQ Plot Scenario",16,"Simulation",77))
+```
+
+We can perform this in comparison with a smaller time period as well.
+
+```{r,warning=F,cache=T}
+### KS Tests
+
+#Calculate p-values for KS tests of simulated S&P500 data
+temp = rep(NA,length(returns.final))
+pval=list()
+for(i in 1:length(returns.final)){
+  pval[[i]]=rep(NA,dim(returns.final[[i]])[2])
+  for(j in 1:dim(returns.final[[i]])[2]){
+    pval[[i]][j]=ks.test(returns.final[[i]][,j],total$return.daily.adjust[2:1500])$p.value
+  }
+  temp[i] = mean(pval[[i]])
+}
+
+#Results matrix
+pvals = matrix(temp,nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(pvals) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(pvals) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+pvals
+
+#Calculate p-values for KS tests of simulated VIX data
+temp = rep(NA,length(vix.final))
+pval=list()
+for(i in 1:length(vix.final)){
+  pval[[i]]=rep(NA,dim(vix.final[[i]])[2])
+  for(j in 1:dim(vix.final[[i]])[2]){
+    pval[[i]][j]=ks.test(vix.final[[i]][,j],total$VIX.Close[2:1500])$p.value
+  }
+  temp[i] = mean(pval[[i]])
+}
+
+#Results matrix
+pvals = matrix(temp,nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(pvals) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(pvals) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+pvals
+
+### QQ Plots
+
+#Key for reading the QQ Plot graph labels: scenario "i" corresponds to the following conditions
+key = matrix(rep(1:16),nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(key) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(key) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+key
+
+#Plot QQ plots for simulated S&P500 data
+qqplot(total$return.daily.adjust[2:1500],returns.final[[13]][,77],xlab="Historical Returns",ylab="Simulated Returns",main=paste("Method 1 QQ Plot Scenario",13,"Simulation",77))
+qqplot(total$return.daily.adjust[2:1500],returns.final[[16]][,77],xlab="Historical Returns",ylab="Simulated Returns",main=paste("Method 1 QQ Plot Scenario",16,"Simulation",77))
+
+#Plot QQ plots for simulated VIX data
+qqplot(total$VIX.Close[2:3000],vix.final[[13]][,77],xlab="Historical VIX",ylab="Simulated VIX",main=paste("Method 1 QQ Plot Scenario",13,"Simulation",77))
+qqplot(total$VIX.Close[2:3000],vix.final[[16]][,77],xlab="Historical VIX",ylab="Simulated VIX",main=paste("Method 1 QQ Plot Scenario",16,"Simulation",77))
+```
+
+**ACF**
+
+```{r,cache=T}
+###Create daily and monthly autocorrelation plots for the S&P 500
+
+#Daily ACF (index vals from 2:length because the first value is NA)
+acf(total$return.daily.adjust[2:length(total$return.daily.adjust)],main="Daily S&P500 Autocorrelation Plot, 2000-2021")
+
+#Monthly ACF
+limit = floor(length(total$return.daily.adjust)/30)
+month.index = 30*(1:limit)
+acf(total$return.daily.adjust[month.index],main="Monthly S&P500 Autocorrelation Plot, 2000-2021")
+
+#Quarterly ACF
+limit = floor(length(total$return.daily.adjust)/90)
+season.index = 90*(1:limit)
+acf(total$return.daily.adjust[season.index],main="Quarterly S&P500 Autocorrelation Plot, 2000-2021")
+
+###Create daily and monthly autocorrelation plots for simulated data
+
+#Key for reading the ACF plot labels: scenario "i" corresponds to the following conditions
+key = matrix(rep(1:16),nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(key) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(key) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+key
+
+#Daily ACF
+conditions = sample(length(returns.final),2,replace=F)
+simulations = sample(dim(returns.final[[i]])[2],2,replace=F)
+for(i in conditions){
+  for(j in simulations){
+    acf(returns.final[[i]][,j],main=paste("Method 1 Daily Returns ACF Scenario",i,"Simulation",j))
+  }
+}
+
+#Monthly ACF
+conditions = sample(length(returns.final),2,replace=F)
+simulations = sample(dim(returns.final[[i]])[2],2,replace=F)
+for(i in conditions){
+  for(j in simulations){
+    limit = floor(length(returns.final[[i]][,j])/30)
+    month.index = 30*(1:limit)
+    acf(returns.final[[i]][,j][month.index],main=paste("Method 1 Monthly Returns ACF Scenario",i,"Simulation",j))
+  }
+}
+
+#Quarterly ACF
+conditions = sample(length(returns.final),2,replace=F)
+simulations = sample(dim(returns.final[[i]])[2],2,replace=F)
+for(i in conditions){
+  for(j in simulations){
+    limit = floor(length(returns.final[[i]][,j])/90)
+    season.index = 90*(1:limit)
+    acf(returns.final[[i]][,j][season.index],main=paste("Method 1 Quarterly Returns ACF Scenario",i,"Simulation",j))
+  }
+}
+```
+
+We perform the same analysis for VIX data.
+
+```{r,cache=T}
+###Create daily and monthly autocorrelation plots for the VIX
+
+#Daily ACF
+acf(total$VIX.Close,main="Daily VIX Autocorrelation Plot, 2000-2021")
+
+#Monthly ACF
+limit = floor(length(total$VIX.Close)/30)
+month.index = 30*(1:limit)
+acf(total$VIX.Close[month.index],main="Monthly VIX Autocorrelation Plot, 2000-2021")
+
+###Create daily and monthly autocorrelation plots for simulated data
+
+#Key for reading the ACF plot labels: scenario "i" corresponds to the following conditions
+key = matrix(rep(1:16),nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(key) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(key) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+key
+
+#Daily ACF
+acf(vix.final[[13]][,1],main=paste("Method 1 Daily VIX ACF Scenario",13,"Simulation",1))
+acf(vix.final[[13]][,33],main=paste("Method 1 Daily VIX ACF Scenario",13,"Simulation",33))
+acf(vix.final[[13]][,77],main=paste("Method 1 Daily VIX ACF Scenario",13,"Simulation",77))
+
+#Monthly ACF
+limit = floor(length(vix.final[[13]][,1])/30)
+month.index = 30*(1:limit)
+acf(vix.final[[13]][,1][month.index],main=paste("Method 1 Monthly VIX ACF Scenario",13,"Simulation",1))
+acf(vix.final[[13]][,3][month.index],main=paste("Method 1 Monthly VIX ACF Scenario",13,"Simulation",33))
+acf(vix.final[[13]][,5][month.index],main=paste("Method 1 Monthly VIX ACF Scenario",13,"Simulation",77))
+```
+
+**Volatility Clustering**
+
+```{r,cache=T}
+plot(returns.final[[13]][,77],xlab="Day Index",ylab="Returns",main=paste("Method 1 Volatility Clustering Scenario",13,"Simulation",77),type="l")
+plot(returns.final[[16]][,77],xlab="Day Index",ylab="Returns",main=paste("Method 1 Volatility Clustering Scenario",16,"Simulation",77),type="l")
+
+
+plot(vix.final[[13]][,77],returns.final[[13]][,77],xlab="VIX Index",ylab="Returns",main=paste("Method 1 Leverage Effect Scenario",13,"Simulation",77))
+plot(vix.final[[16]][,77],returns.final[[16]][,77],xlab="VIX Index",ylab="Returns",main=paste("Method 1 Leverage Effect Scenario",16,"Simulation",77))
+```
+
+\subsubsection{Returns}
+
+Calculation of returns for different conditions:
+
+```{r,cache=T}
+#Calculate CAGR Values
+cagr = rep(NA,length(invest.final))
+for(i in 1:length(invest.final)){
+  cagr[i] = (mean(invest.final[[i]][nrow(invest.final[[i]]),])/1000)^(1/(nrow(invest.final[[i]])/253))-1
+}
+
+#Final Results
+final.results = matrix(cagr,nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(final.results) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(final.results) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+final.results = round(final.results,3)
+final.results*100
+
+#Calculate CAGR Quantiles
+cagr = list()
+for(i in 1:length(invest.final)){
+  cagr[[i]] = quantile(((invest.final[[i]][nrow(invest.final[[i]]),])/1000)^(1/(nrow(invest.final[[i]])/253))-1,c(0.025,0.975))
+}
+cagr
+```
+
+\subsubsection{Hypothesis Testing (P-Values)}
+
+Calculation of p-values:
+
+```{r,cache=T}
+#Baseline CAGR
+stocks = (total$SPY.Adjusted[length(total$SPY.Adjusted)]/total$SPY.Adjusted[1])^(1/27)-1
+cagr.hist = 0.11
+
+#Calculate P-Values
+pvals = rep(NA,length(invest.final))
+for(i in 1:length(invest.final)){
+  x = (invest.final[[i]][nrow(invest.final[[i]]),]/1000)^(1/(nrow(invest.final[[i]])/253))-1
+  pvals[i] = sum(x>cagr.hist)/length(x)
+}
+
+#Final Results
+final.results = matrix(pvals,nrow=length(ndays),ncol=length(lambda),byrow=T)
+rownames(final.results) = c("10 Years","15 Years","20 Years","27 Years")
+colnames(final.results) = c("Bound = 1","Bound = 3","Bound = 7","Bound = 10")
+final.results = round(final.results,3)
+final.results
+```
+
+\subsubsection{Sampling Distribution Properties}
+
+```{r,cache=T}
+#Calculate All 100 CAGR Values for Scenario 13
+cagr = rep(NA,100)
+for(i in 1:100){
+  cagr[i] = ((invest.final[[13]][nrow(invest.final[[13]]),i])/1000)^(1/(nrow(invest.final[[13]])/253))-1
+}
+
+#Summary Statistics, Histogram, and QQ Plot of CAGRs
+summary(cagr)
+
+boxplot(cagr,main="Boxplot of Returns, 27 Years w/ Lambda=1")
+
+var(cagr)
+
+hist(cagr,main="Histogram of CAGRs, Scenario 13",xlab="CAGR",breaks=40)
+
+qqnorm(cagr,main="QQ Plot of CAGRs, Scenario 13",ylab="CAGR")
+qqline(cagr,col="red")
+
+ks.test(cagr,rnorm)$p.value
+
+
+#Calculate All 100 CAGR Values for Scenario 1
+cagr = rep(NA,100)
+for(i in 1:100){
+  cagr[i] = ((invest.final[[1]][nrow(invest.final[[1]]),i])/1000)^(1/(nrow(invest.final[[1]])/253))-1
+}
+
+#Summary Statistics, Histogram, QQ Plot, etc. of CAGRs
+summary(cagr)
+
+boxplot(cagr,main="Boxplot of Returns, 10 Years w/ Lambda=1")
+
+var(cagr)
+
+hist(cagr,main="Histogram of CAGRs, Scenario 1",xlab="CAGR",breaks=40)
+
+qqnorm(cagr,main="QQ Plot of CAGRs, Scenario 1",ylab="CAGR")
+qqline(cagr,col="red")
+
+ks.test(cagr,rnorm)$p.value
+```
